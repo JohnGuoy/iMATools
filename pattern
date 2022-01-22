@@ -1,0 +1,1187 @@
+#!/usr/bin/perl
+#--------------------------------------------------------------------------
+# This program is Copyright(C) 2015-20, Xinyu Wang (wangxinyuhs@126.com)
+#
+# This program is part of iBSTools.
+#
+# iBSTools is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# iBSTools is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with the program.  If not, see <http://www.gnu.org/licenses/>.
+#--------------------------------------------------------------------------
+
+=program flow -- modules
+	*  params control
+	*  Input methy files(.wig) and Store.
+	1. Get hotspots accoding to methy level.
+	2. Determine the dividing line accoding to F test and CG density.
+	3. Determine the accurate region boundary from hotspot boundary to dividing line. 
+	*  Statics,Filter,Print.
+=cut
+
+use strict;
+use warnings;
+use Getopt::Long;
+use File::Basename;
+
+our $VERSION = "1.3.0";
+
+# params control
+my (
+	$help,
+	$infile,				#input, only directory. require ".wig" files
+	$outdir,			#output, only directory.
+	
+	$filter_str,			#pattern, length , mean_methy ;   UMR_3500_0_0.1
+	
+	$sample_name,		#like H1,IMR90,HMec,Hcc1954 and so on
+	
+	$silent, 			#silent: will not to report welcome(), goodbye().
+);
+
+my $hs_str = "4,4,4";	#hotspot string,  U , I , F
+my $gap_length_threshold = 500;
+
+GetOptions(
+	'help|man|h'       => \$help,
+	
+	'hs_string=s'      => \$hs_str,
+	'filter_string=s'  => \$filter_str,
+
+	'n|name=s'	       => \$sample_name,
+	'i|infile=s'       => \$infile,
+	'o|outdir=s'       => \$outdir,
+	
+	'silent'		   => \$silent
+);
+
+print_helpfile() if($help);
+required_args($infile,$outdir,$sample_name);
+outdir_control($outdir);
+
+unless($silent){
+	welcome();
+}
+
+warn "SAMPLE_NAME:$sample_name\n";
+warn "INPUT:$infile\n";
+warn "OUTPUT:$outdir\n\n";
+
+
+=filter
+###Output File:
+my $ucsc_filter_file = "$ucsc_dir/genome_filter_ucsc.bed";
+open my $filter_ucsc_fh,">","$ucsc_filter_file" or die $ucsc_filter_file."\nPlease check up this path!\n";
+print $filter_ucsc_fh qq(track itemRgb="On" name="$sample_name filter region" description="pattern regions" visibility=3\n);	
+
+my @filter_region_arr = (); 
+
+=cut
+
+my $genome_CG_length = 0;		#statics
+my @genome_regions = ();		
+
+=filter
+###TEMP Canyon printout
+my $filter_dir = "$outdir/filter";		#the ucsc folder
+outdir_control($filter_dir);
+=cut 
+
+
+####I/O 
+warn call_time()."Read input methylation file(.wig).\n";
+my ( $chr_site_hs_ref , $chr_methy_hs_ref ) = wig_chr_split( $infile );
+my $out_fh_hs_ref = out_settings( $outdir , $sample_name );
+
+foreach my $chr ( sort keys %{ $chr_site_hs_ref } ){
+	my ( $site_ref, $methy_ref ) = ( ${$chr_site_hs_ref}{$chr} , ${$chr_methy_hs_ref}{$chr} );  #site, methy
+	
+	#get hotspot from genome methylation 
+	my ($hs_start_ref,$hs_end_ref,$hs_pattern_ref)= get_hotspot($site_ref,$methy_ref,$hs_str,$gap_length_threshold);
+	
+	if(scalar @$hs_start_ref >= 1){
+		#determine the boundary when extension stop
+		my $bound_arr_ref = determine_dividing($hs_start_ref,$hs_end_ref,$hs_pattern_ref,$site_ref,$methy_ref);	
+		
+		#extend
+		my $region_arr_ref = best_bound($hs_start_ref,$hs_end_ref,$hs_pattern_ref,$bound_arr_ref,$methy_ref , $site_ref );
+		
+		#open my $hs_ucsc_fh,">","$outdir/hs_$chr.bed" or die "Please check up this path!\n";
+		#open my $bound_ucsc_fh,">","$outdir/bound_$chr.bed" or die "Please check up this path!\n";
+		#print $hs_ucsc_fh qq(track itemRgb="On" name="$chr hs" description="pattern regions" visibility=3\n);	
+		#print $bound_ucsc_fh qq(track itemRgb="On" name="$chr bound" description="pattern regions" visibility=3\n);	
+		#print_hotspot ( $chr , $hs_start_ref , $hs_end_ref , $hs_pattern_ref , $bound_arr_ref , $site_ref , $hs_ucsc_fh , $bound_ucsc_fh );
+
+		#print region to BED format.(UCSC)
+		my $pattern_region_ref = print_to_BED($out_fh_hs_ref,$chr,$region_arr_ref,$site_ref,$methy_ref,$hs_pattern_ref,$gap_length_threshold);
+
+		#statics:
+		$genome_CG_length += ($$site_ref[-1] - $$site_ref[0]);
+		push @genome_regions,@$pattern_region_ref;
+	}
+	unless($silent){
+		warn call_time()."$chr is completed...\n";
+	}
+}
+warn call_time()."Completed!\n";
+
+unless($silent){
+	goodbye();
+}
+
+#print filter region
+=print filter regions into a single file
+if($filter_str){
+	open SUBREGION,">","$ucsc_dir/genome_$filter_str.bed" or die "$outdir/genome_$filter_str.bed"."\nPlease check up this path!\n";
+	print SUBREGION qq(Chr\tStart\tEnd\tPattern\tLength\tCpG_sites\tMean\tVar\n);
+	foreach my $i(@filter_region_arr){
+		print SUBREGION $i."\n";
+	}
+}
+=cut
+#print STATICs
+open STATIC,">","$outdir/$sample_name"."_patterns_statics.txt" or die "$outdir/$sample_name"."_patterns_statics.txt"."\nPlease check up this path!\n";
+print STATIC "Pattern\tCounts\taverage CGs\taverage length\tlength%\n";
+my ($UM_count , $IM_count , $FM_count)                         = (0,0,0);
+my ($UM_region_CGs , $IM_region_CGs , $FM_region_CGs)          = (0,0,0);
+my ($UM_region_length , $IM_region_length , $FM_region_length) = (0,0,0);
+
+foreach my $line(@genome_regions){
+	next unless $line;
+			
+	my @arr = split ("\t",$line);
+	my ($pattern,$length,$CG_sites,$mean,$var) = ($arr[3],$arr[4],$arr[5],$arr[6], $arr[7]);
+	
+	if($pattern eq "UMR"){
+		$UM_count++;
+		$UM_region_CGs += $CG_sites;
+		$UM_region_length += $length;
+	}
+	if($pattern eq "IMR"){
+		$IM_count++;
+		$IM_region_CGs += $CG_sites;
+		$IM_region_length += $length;
+	}
+	if($pattern eq "FMR"){
+		$FM_count++;
+		$FM_region_CGs += $CG_sites;
+		$FM_region_length += $length;
+	}
+}
+
+if($UM_count > 0){
+	printf STATIC "UMR\t%d\t%d\t%d\t%0.2f%%\n",$UM_count,($UM_region_CGs/$UM_count),($UM_region_length/$UM_count),($UM_region_length/$genome_CG_length)*100;
+}
+else{
+	print STATIC "There is no UMRs!\n";
+}
+if($IM_count > 0){
+	printf STATIC "IMR\t%d\t%d\t%d\t%0.2f%%\n",$IM_count,($IM_region_CGs/$IM_count),($IM_region_length/$IM_count),($IM_region_length/$genome_CG_length)*100;
+}
+else{
+	print STATIC "There is no IMRs!\n";
+}
+if($FM_count > 0 ){
+	printf STATIC "FMR\t%d\t%d\t%d\t%0.2f%%\n",$FM_count,($FM_region_CGs/$FM_count),($FM_region_length/$FM_count),($FM_region_length/$genome_CG_length)*100;
+}
+else{
+	print STATIC "There is no FMRs!\n";
+}
+
+
+=DESCRIPTION out_settings  	[ INDEPENDENT ]
+	* Name: out_settings
+	* Function: set up file handle and header of output files.
+	* Params: $outdir, $file_name,
+	* Return: \%out_fh_hs.
+	* Independence: [ INDEPENDENT ]
+=cut
+sub out_settings{
+	my ( $outdir , $sample_name ) = @_;
+
+####create file handle and set up header
+	my $ucsc_bed_file = "$outdir/$sample_name"."_ucsc.bed";
+	open my $ucsc_fh,">","$ucsc_bed_file" or die $ucsc_bed_file."\nPlease check up this path!\n";
+	print $ucsc_fh qq(track itemRgb="On" name="$sample_name region" description="pattern regions" visibility=3\n);	
+
+	my $UM_bed_file = "$outdir/$sample_name"."_UM.bed";
+	open my $UM_fh,">","$UM_bed_file" or die $UM_bed_file."\nPlease check up this path!\n";
+	print $UM_fh qq(Chr\tStart\tEnd\tPattern\tLength\tCpG_sites\tMean\tVar\n);
+
+	my $IM_bed_file = "$outdir/$sample_name"."_IM.bed";
+	open my $IM_fh,">","$IM_bed_file" or die $IM_bed_file."\nPlease check up this path!\n";
+	print $IM_fh qq(Chr\tStart\tEnd\tPattern\tLength\tCpG_sites\tMean\tVar\n);	
+
+	my $FM_bed_file = "$outdir/$sample_name"."_FM.bed";
+	open my $FM_fh,">","$FM_bed_file" or die $FM_bed_file."\nPlease check up this path!\n";
+	print $FM_fh qq(Chr\tStart\tEnd\tPattern\tLength\tCpG_sites\tMean\tVar\n);
+
+####store file handles in hash	
+	my %out_fh_hs = (
+		'UCSC' => $ucsc_fh,
+		'UMR'   => $UM_fh,
+		'IMR'   => $IM_fh,
+		'FMR'   => $FM_fh,
+		);
+
+	return \%out_fh_hs;
+}
+
+
+#test print 
+sub print_hotspot{
+	my ( $chr , $hs_start_ref , $hs_end_ref , $hs_pattern_ref , $bound_arr_ref , $site_ref , $hs_ucsc_fh , $bound_ucsc_fh ) = @_;
+	
+	my %chr_methy_total_hs = ();
+	$chr_methy_total_hs{"UMR"} = region_cons_CGs($site_ref, 0, $#$site_ref, "UMR");
+	$chr_methy_total_hs{"IMR"} = region_cons_CGs($site_ref, 0, $#$site_ref, "IMR");
+	$chr_methy_total_hs{"FMR"} = region_cons_CGs($site_ref, 0, $#$site_ref, "FMR");
+	
+	foreach my $hs(0..$#$hs_start_ref){			#extend by two side
+		my ( $left_bound , $right_bound ) = ( $$bound_arr_ref[$hs][0] , $$bound_arr_ref[$hs][1] );
+		my ( $left_edge , $right_edge , $pattern )   = ( $$hs_start_ref[$hs] , $$hs_end_ref[$hs] , $$hs_pattern_ref[$hs] );
+		
+		print $bound_ucsc_fh ucsc_bed_line( $chr,$$site_ref[$left_bound],$$site_ref[$right_bound],$pattern );
+		print $hs_ucsc_fh ucsc_bed_line( $chr,$$site_ref[$left_edge],$$site_ref[$right_edge],$pattern );
+	}
+}
+
+=DESCRIPTION wig_chr_split  	[ INDEPENDENT ]
+    * Name: wig_chr_split
+    * Function: split file into chr arrs.
+    * Params: $infile
+    * Return: \@chr_methy_arrs , \@chr_site_arrs
+    * Independence: [ INDEPENDENT ]
+=cut
+
+sub wig_chr_split{
+	my ( $infile ) = @_;
+
+	my $in_fh;
+	if( $infile =~ /gz$/ ){
+		open $in_fh,"zcat $infile |" or die $infile."\nwig file open error, Please check up this path!\n";
+	}
+	elsif( $infile =~ /wig$/ ){
+		open $in_fh,"<",$infile or die $infile."\nwig file open error, Please check up this path!\n";
+	}
+	else{
+		die "ERROR: $infile is not .wig or .gz file.\n";
+	}
+	
+	my %chr_site_hs  = ();
+	my %chr_methy_hs = ();
+
+	my $chr = "0";
+	while( <$in_fh> ){
+		next if(/track type/);
+		s/[\r\n]$//g;
+		if(/chrom/){ 	#declaration line
+			my @declaration_arrs = split /\s+/;
+			$chr = substr( $declaration_arrs[1], 6 ); #get chr from declaration line
+			$chr_site_hs{$chr}  = [];
+			$chr_methy_hs{$chr} = [];
+		}
+		else{
+			my @arr = split ;
+			push @{ $chr_site_hs{$chr}  } , $arr[0];
+			push @{ $chr_methy_hs{$chr} } , $arr[1];
+		}
+	}
+	close $in_fh;
+	return ( \%chr_site_hs , \%chr_methy_hs );
+}
+
+#Not Used in current version
+sub get_methy_wig_chr{
+	my $wig_file = $_[0];
+	open my $in_fh,"<",$wig_file or die $wig_file."\nPlease check up this path!\n";
+	
+	#read the line which containg chromosome,get chromosome.
+	my $line = <$in_fh>;
+	while( $line !~ /chrom=/){
+		$line = <$in_fh>;
+	}
+
+	$line =~ s/[\r\n]$//g;
+	my @declaration_arrs = split /\s+/;
+	my $chr = substr( $declaration_arrs[1], 6 ); #get chr from declaration line
+	
+	my @Site  = ();		#CpG position
+	my @Methy = ();		#methy
+ 
+	while(<$in_fh>){
+		s/[\r\n]$//g;
+		my @arr = split;
+		push @Site , $arr[0];
+		push @Methy, $arr[1];
+	}
+	close $in_fh;
+	return ($chr,\@Site,\@Methy);
+}
+
+=DESCRIPTION getHotspot 			[ INDEPENDENT ]
+Goal: get hotspot from methylation array.
+Usage: getHotspot(\@Site,\@Methy,$hs_str)
+Return:
+#start(CG index), end(CG index), hotspot pattern
+#return (\@hs_start,\@hs_end,\@hs_pattern);
+1	7	FMR
+9	18	FMR
+20	27	FMR
+=cut
+sub get_hotspot{
+	my ($site_ref,$methy_ref,$hs_str,$gap_threshold) = @_;
+	
+	my ($UM_number,$IM_number,$FM_number) = split(",",$hs_str);
+	my @hs_start   = ();
+	my @hs_end     = ();
+	my @hs_pattern = ();
+	
+	my ($hot_index,$suffix,$seed_num)=(0,0,0);
+	my $CG_count = scalar @$methy_ref;
+
+	while($suffix < $CG_count){
+		$seed_num=0;
+		if( $$methy_ref[$suffix] <= 0.1 ){
+			$seed_num++;
+			for(my $j=$suffix+1;$j<$CG_count;$j++){
+				if( $$methy_ref[$j] <=0.1 && ($$site_ref[$j] - $$site_ref[$j-1]) <= $gap_threshold ){
+					$seed_num++;
+				}
+				else{
+					last;
+				}
+			}###end for
+			if($seed_num>=$UM_number){
+				$hs_start[$hot_index]   = $suffix;
+				$hs_end[$hot_index]     = $suffix + $seed_num - 1;
+				$hs_pattern[$hot_index] = "UMR";
+				$hot_index++;
+			}
+			$suffix=$suffix+$seed_num;
+			next;
+		}##end if <0.2
+		if($$methy_ref[$suffix]>=0.4 && $$methy_ref[$suffix]<=0.6){
+			$seed_num++;
+			for(my $j=$suffix+1;$j<$CG_count;$j++){
+				if($$methy_ref[$j]>=0.4 && $$methy_ref[$j]<=0.6
+					 && ($$site_ref[$j] - $$site_ref[$j-1]) <= $gap_threshold ){
+					$seed_num++;
+				}
+				else{
+					last;
+				}
+			}###end for
+			if($seed_num>=$IM_number){
+				$hs_start[$hot_index]   = $suffix;
+				$hs_end[$hot_index]     = $suffix+$seed_num-1;
+				$hs_pattern[$hot_index] = "IMR";
+				$hot_index++;
+			}
+			$suffix=$suffix+$seed_num;
+			next;
+		}##end if >=0.4 && $$methy_ref[$suffix]<=0.6
+		if($$methy_ref[$suffix]>=0.8){
+			$seed_num++;
+			for(my $j=$suffix+1;$j<$CG_count;$j++){
+				if($$methy_ref[$j]>=0.8 && ($$site_ref[$j] - $$site_ref[$j-1]) <= $gap_threshold ){
+					$seed_num++;
+				}
+				else{
+					last;
+				}
+			}###end for
+			if($seed_num>=$FM_number){
+				$hs_start[$hot_index]   = $suffix;
+				$hs_end[$hot_index]     = $suffix+$seed_num-1;
+				$hs_pattern[$hot_index] = "FMR";
+				$hot_index++;
+			}
+			$suffix=$suffix+$seed_num;
+			next;
+		}##end if >=0.8
+		$suffix++;
+	}
+	
+	return (\@hs_start,\@hs_end,\@hs_pattern);
+}
+
+=DESCRIPTION determine_dividing 	[ ANOVA_bound REQUIRED ]
+Goal: determine extend boundary from hotspot array. (gap and pattern ANOVA)
+Usage: determine_dividing(\@hs_start,\@hs_end,\@hs_pattern,\@Site)
+Return:
+#left(CG index), right(CG index),
+#return (\@left_bound_arr,\@right_bound_arr);
+(1	7	FMR) 0	8
+(9	18	FMR) 9	19
+(20	27	FMR) 20	30
+=cut
+sub determine_dividing{
+	my ($hs_left_ref,$hs_right_ref,$hs_pattern_ref,$site_ref,$methy_ref) = @_;
+	my $gap_threshold = 500;
+	
+	my @bound_arr = ();
+	
+	my ($last_right_bound, $next_left_bound,$ANOVA_boundary) = (0, 0, 0);
+	if(scalar @$hs_left_ref >= 2){
+		$next_left_bound = $$hs_left_ref[1] - 1; #next bound
+	}
+	else{
+		$next_left_bound = $#$site_ref - 1; #last site 
+	}
+	foreach my $i(0..$#$hs_left_ref - 1){	#determine extension boundary.
+		#next hotspot left OR ANOVA boundary.  
+		if($$hs_pattern_ref[$i] ne $$hs_pattern_ref[$i+1]){		#adjacent pattern is different
+			$ANOVA_boundary  = ANOVA_bound($site_ref,$methy_ref,
+				"$$hs_left_ref[$i],$$hs_right_ref[$i],$$hs_left_ref[$i+1],$$hs_right_ref[$i+1]");
+				
+			#die "$$site_ref[$ANOVA_boundary]" if( $$site_ref[$$hs_left_ref[$i+1]] eq 182660); 	# 182570
+			$next_left_bound = $ANOVA_boundary + 1;
+		}
+		else{
+			$next_left_bound  = $$hs_left_ref[$i+1]  ;
+		}
+		
+		my ($left_bound,$right_bound) = (0,0);
+#=cut
+		foreach my $bound( reverse ( $last_right_bound + 1 .. $$hs_left_ref[$i] ) ){
+			$left_bound = $bound;
+			last if( $$site_ref[$left_bound] - $$site_ref[$left_bound - 1] > $gap_threshold);
+		}
+		foreach my $bound($$hs_right_ref[$i] .. $next_left_bound - 1){
+			$right_bound = $bound;
+			last if( $$site_ref[$right_bound + 1] - $$site_ref[$right_bound] > $gap_threshold);
+		}
+=cut			
+		for( $left_bound = $$hs_left_ref[$i]; $left_bound > $last_right_bound; $left_bound -- ){
+			last if( $$site_ref[$left_bound] - $$site_ref[$left_bound - 1] > $gap_threshold);
+		}
+		for( $right_bound = $$hs_right_ref[$i]; $right_bound < $next_left_bound; $right_bound ++ ){
+			last if( $$site_ref[$right_bound + 1] - $$site_ref[$right_bound] > $gap_threshold);
+		}
+=cut		
+		#die "$right_bound\t$$site_ref[$right_bound]\n" if( $$site_ref[$$hs_left_ref[$i+1]] eq 182660); 	# 182570
+		
+		push @bound_arr,[$left_bound,$right_bound];
+		#last hotspot right OR ANOVA boundary. 
+		if($$hs_pattern_ref[$i] ne $$hs_pattern_ref[$i+1]){
+			$last_right_bound = $ANOVA_boundary;
+		}
+		else{
+			$last_right_bound = $$hs_right_ref[$i];
+		}
+	}
+	{#the last hotspot
+		$next_left_bound = $#$site_ref - 1; #last site index
+		my ($left_bound,$right_bound) = (0,0);
+		my $i = $#$hs_left_ref;
+		for( $left_bound = $$hs_left_ref[$i]; $left_bound > $last_right_bound; $left_bound -- ){
+			last if( $$site_ref[$left_bound] - $$site_ref[$left_bound - 1] > $gap_threshold);
+		}
+		for( $right_bound = $$hs_right_ref[$i]; $right_bound < $next_left_bound; $right_bound ++ ){
+			last if( $$site_ref[$right_bound + 1] - $$site_ref[$right_bound] > $gap_threshold);
+		}
+		push @bound_arr,[$left_bound,$right_bound];
+	}
+	return \@bound_arr;
+}
+
+=DESCRIPTION ANOVA_bound 			[ mean_of_array REQUIRED ]
+Goal: determin boundary from two adjacent hotspot (different patterns). 
+Usage: ANOVA_bound(\@Site,\@Methy,"50,58,77,82")
+Return:
+#boundary (best boundary line based on ANOVA)
+(50,58,77,82)  --- 67
+=cut
+sub ANOVA_bound{					
+	my ($site_ref, $methy_ref, $region_str) = @_;
+	
+	my ($last_start,$last_end,$next_start,$next_end) = split(/,/,$region_str);
+	if($next_start eq $last_end + 1){	#gap is null
+		return $last_end;
+	}
+	
+	my ($mean1,$mean2,$mean) = (0,0,0);		#mean of last,next,gap	
+	my (@last,@next,@gap)    = ((),(),());	#last hotspot,next hotspot,gap methy,			
+	my ($F,$Var_b,$Var_i)    = (0,0,0);		#F     = Var_b/Var_i
+	my ($mean1i,$mean_t,$mean2i) = (0,0,0);	#Var_b : mean1i,mean2i. total mean:mean_t
+	my ($num1,$num2)  = (0,0);				#Var_b : num1,num2
+	my $edge          = 0;					#the edge
+	
+	foreach my $i($last_start..$last_end){
+		push (@last,$$methy_ref[$i]);
+	}
+	foreach my $i($next_start..$next_end){
+		push (@next,$$methy_ref[$i]);
+	}
+	($mean1,$mean2) = (mean_of_array(@last),mean_of_array(@next));
+	
+	foreach my $i( ($last_end+1)..($next_start-1) ){
+		push(@gap,$$methy_ref[$i]);
+		$Var_i += ($$methy_ref[$i]-$mean2)**2;
+	}
+	$mean = mean_of_array(@gap);
+	
+	($num1,$num2) = ($#last+1,$#next+$#gap+2);
+	$mean1i = $mean1;
+	$mean2i = ($mean2*($#next+1)+$mean*($#gap+1))/$num2;
+	$mean_t = ($mean1i*$num1+$mean2i*$num2)/($num1+$num2);
+	
+	$Var_b = (($mean1i-$mean_t)**2)*$num1 + (($mean2i-$mean_t)**2)*$num2;
+	$F = $Var_b / ($Var_i + 1);
+	$edge = $last_end;
+	
+	foreach my $i( $last_end+1 .. $next_start-1 ){
+		$Var_i = $Var_i - ($$methy_ref[$i]-$mean2)**2 + ($$methy_ref[$i]-$mean1)**2;
+		
+		#calculate var B
+		($num1,$num2) = ($num1+1,$num2-1);
+		$mean1i = ($mean1i*($num1-1) + $$methy_ref[$i])/$num1;
+		$mean2i = ($mean2i*($num2-1) - $$methy_ref[$i])/$num2;
+		$Var_b = (($mean1i-$mean_t)**2)*$num1 + (($mean2i-$mean_t)**2)*$num2;
+		
+		if($Var_b/($Var_i + 1) > $F){
+			$F = $Var_b/($Var_i + 1);
+			$edge = $i;
+		}
+	}
+	return $edge;			# It is confirmed that the edge is in left cluster , not in right cluster. 
+}
+
+=DESCRIPTION mean_of_array			[ INDEPENDENT ]
+Goal: calculate mean of an array. (You'd better consider the array is null.)
+Usage: mean_of_array(\@array)
+Return: a mean or 0 ( couple with warnings because of null array )
+=cut
+sub mean_of_array{		#( @array )
+	my @data = @_;
+
+	my ($sum , $num) = (0 , scalar @data);
+	foreach my $i (@data){
+		$sum += $i;
+	}
+	if($num > 0){
+		return $sum/$num;
+	}
+	else{
+		print "WARNING:The array is null.(mean of array)\n";
+		return 0;
+	}
+}
+
+=DESCRIPTION best_bound				[ mean_pattern_judge REQUIRED ]
+=cut
+sub best_bound{				
+	my ( $hs_start_ref , $hs_end_ref , $hs_pattern_ref , $bound_arr_ref , $methy_ref ,$site_ref ) = @_;
+	
+	#my $bound_CG_wave = 0.1;	#the wave value of bound CGs which allows.
+	
+	my @region = ();
+	
+	foreach my $hs(0..$#$hs_start_ref){			#extend by two side
+		my ( $left_bound , $right_bound ) = ( $$bound_arr_ref[$hs][0] , $$bound_arr_ref[$hs][1] );
+		
+		my ( $left_edge , $right_edge , $pattern )   = ( $$hs_start_ref[$hs] , $$hs_end_ref[$hs] , $$hs_pattern_ref[$hs] );
+		
+		my ( $sum , $num ) = ( 0 , 0 );
+		foreach my $i( $left_edge .. $right_edge ){
+			$num ++;
+			$sum += $$methy_ref[$i];
+		}
+		
+		#left_bound
+		my ( $bound , $var ) = ( $left_bound , region_variance( $left_bound, $right_edge , $methy_ref ) );
+		
+		
+		foreach my $i( $left_bound + 1 .. $left_edge - 1 ){ #choose the best bound from left_bound to left_edge
+			next if( !mean_pattern_judge( $$methy_ref[$i] , $pattern , 0.2 ) ) ; #the final bound of UM : 0 - 0.2 , IM: 0.3-0.7, FM: 0.7-1 
+			
+			my $i_var = region_variance( $i, $left_edge , $methy_ref );
+			if( $i_var < $var ){
+				$var   = $i_var ;
+				$bound = $i ;
+			}
+		}
+		$left_bound = $bound;
+		
+		#right_bound
+		( $bound , $var ) = ( $right_bound , region_variance( $right_edge, $right_bound , $methy_ref ) );
+		foreach my $i ( reverse( $right_edge + 1 .. $right_bound - 1 ) ){ #choose the best bound from right_edge to right_bound
+			next if( !mean_pattern_judge( $$methy_ref[$i] , $pattern , 0.2 ) ) ; 
+			
+			my $i_var = region_variance( $right_edge , $i , $methy_ref );
+			if( $i_var < $var ){
+				$var   = $i_var ;
+				$bound = $i ;
+			}
+		}
+		$right_bound = $bound;
+		
+		#bound or hotspot edge.
+		{
+			if($pattern eq "UMR"){  #UMR : region average methy <0.1
+				if( !mean_pattern_judge( region_mean($left_bound,$right_edge,$methy_ref,$site_ref) , $pattern , 0.1 ) ){  #region average methy < 0.1
+					$left_bound = $left_edge;
+				}
+				if( !mean_pattern_judge( region_mean($left_bound,$right_bound,$methy_ref,$site_ref) , $pattern , 0.1 ) ){ #region average methy < 0.1
+					$right_bound = $right_edge;
+				}
+			}
+			else{	#IMR/FMR: region conserved CpGs >0.3
+				my $num = region_cons_CGs( $methy_ref, $left_bound , $left_edge , $pattern );
+				if( $num / ( $left_edge - $left_bound + 1 ) >= 0.3 ){
+					;
+				}
+				else{
+					$left_bound = $left_edge;
+				}
+				
+				$num = region_cons_CGs( $methy_ref, $right_edge , $right_bound , $pattern );
+				if( $num / ( $right_bound - $right_edge + 1 ) >= 0.3 ){
+					;
+				}
+				else{
+					$right_bound = $right_edge;
+				}
+			}
+		}
+		
+		push @region,[ $left_bound , $right_bound ];
+	}
+	return \@region;
+}
+
+
+=DESCRIPTION extend_two_side		[ mean_pattern_judge REQUIRED ]
+not available in current version
+=cut
+sub extend_two_side{				
+	my ( $hs_start_ref , $hs_end_ref , $hs_pattern_ref , $bound_arr_ref , $methy_ref ) = @_;
+	
+	my @region = ();
+	
+	foreach my $hs(0..$#$hs_start_ref){			#extend by two side
+		my ( $left_bound , $right_bound ) = ( $$bound_arr_ref[$hs][0] , $$bound_arr_ref[$hs][1] );
+		
+		my ( $left_edge , $right_edge )   = ( $$hs_start_ref[$hs] , $$hs_end_ref[$hs] );
+		
+		my ( $sum , $num ) = ( 0 , 0 );
+		foreach my $i($left_edge..$right_edge){
+			$num ++;
+			$sum += $$methy_ref[$i];
+		}
+		while( 1 ){
+			if( $left_edge  > $left_bound ){	#left extend
+				$left_edge  --;
+				
+				$num ++;
+				$sum += $$methy_ref[$left_edge];
+				if( !mean_pattern_judge( $sum/$num , $$hs_pattern_ref[$hs] , 0.1 ) ){
+					$left_edge ++;
+					foreach my $i($left_edge..$$hs_start_ref[$hs]){		#modify left edge.
+						$left_edge = $i;
+						last if ( mean_pattern_judge( $$methy_ref[$i] , $$hs_pattern_ref[$hs] , 0.2 ) );
+					}
+					
+					last;
+				}
+			}
+			
+			if( $right_edge < $right_bound ){	#right extend
+				$right_edge ++;
+				
+				$num ++;
+				$sum += $$methy_ref[$right_edge];
+				if( !mean_pattern_judge( $sum/$num , $$hs_pattern_ref[$hs] , 0.1 ) ){
+					$right_edge --;
+					foreach my $i(reverse $$hs_end_ref[$hs]..$right_edge){		#modify right edge.
+						$right_edge = $i;
+						last if ( mean_pattern_judge( $$methy_ref[$i] , $$hs_pattern_ref[$hs] , 0.2 ) );
+					}
+					last;
+				}
+			}
+			last if ( $left_edge  == $left_bound and $right_edge == $right_bound );
+		}
+		push @region,[ $left_edge , $right_edge ];
+	}
+	return \@region;
+}
+
+=DESCRIPTION extend_canyon			[ INDEPENDENT ]
+not available in current version
+=cut
+sub extend_canyon{				
+	my ( $hs_start_ref , $hs_end_ref , $hs_pattern_ref , $bound_arr_ref , $methy_ref ) = @_;
+	
+	my @region = ();
+	my @pattern = ();
+	
+	foreach my $hs(0..$#$hs_start_ref){			#extend by two side
+		next if ($$hs_pattern_ref[$hs] ne "UMR");
+		my ( $left_bound , $right_bound ) = ( $$bound_arr_ref[$hs][0] , $$bound_arr_ref[$hs][1] );
+		
+		my ( $left_edge , $right_edge )   = ( $$hs_start_ref[$hs] , $$hs_end_ref[$hs] );
+		
+		my ( $sum , $num ) = ( 0 , 0 );
+		foreach my $i($left_edge..$right_edge){
+			$num ++;
+			$sum += $$methy_ref[$i];
+		}
+		while( 1 ){
+			if( $left_edge  > $left_bound ){	#left extend
+				$left_edge  --;
+				
+				$num ++;
+				$sum += $$methy_ref[$left_edge];
+				if( ( $sum/$num ) > 0.1 ){		#Canyon
+					$left_edge ++;
+					last;
+				}
+			}
+			
+			if( $right_edge < $right_bound ){	#right extend
+				$right_edge ++;
+				
+				$num ++;
+				$sum += $$methy_ref[$right_edge];
+				if( ( $sum/$num ) > 0.1 ){		#Canyon
+					$right_edge --;
+					last;
+				}
+			}
+			last if ( $left_edge  == $left_bound and $right_edge == $right_bound );
+		}
+		push @region,[ $left_edge , $right_edge ];
+		push @pattern,"canyon";
+	}
+	return \@region,\@pattern;
+}
+
+=DESCRIPTION mean_pattern_judge		[ INDEPENDENT ]
+Goal: judge mean methylation of the methylation. 
+Usage: mean_pattern_judge( $mean , $pattern , $wave )
+Return: 1 or 0
+=cut
+sub mean_pattern_judge{	
+	my ($mean_methy , $pattern , $wave) = @_;
+	my $center = $pattern eq "UMR" ? 0     #UMR in 0~0.1
+			   : $pattern eq "IMR" ? 0.5
+			   :  	  				  0.9
+			   ;
+			   
+	if(abs( $mean_methy - $center) <= $wave ){
+		return "1";
+	}
+	else{
+		return "0";
+	}
+}
+
+=DESCRIPTION print_to_BED 			[ region_features,ucsc_bed_line REQUIRED ]
+Goal: print to BED (and UCSC)
+Usage: print_to_BED ( $bed_file, $chr,$region_arr_ref,$site_ref,$methy_ref,$hs_pattern_ref,$ucsc_fh )
+Return: qq($chr\t$left_edge\t$right_edge\t$pattern\t$digital_features)
+=cut
+sub print_to_BED{					
+	my ( $out_fh_hs_ref, $chr, $region_arr_ref, $site_ref, $methy_ref, $hs_pattern_ref, $gap_threshold ) = @_;
+
+	my @region = ();
+	
+	my $index = 0;
+
+	#hyper_test input.
+	my $m_bg = scalar @$methy_ref;
+	my %chr_methy_total_hs = ();
+	$chr_methy_total_hs{"UMR"} = region_cons_CGs($methy_ref, 0, $#$methy_ref, "UMR");
+	$chr_methy_total_hs{"IMR"} = region_cons_CGs($methy_ref, 0, $#$methy_ref, "IMR");
+	$chr_methy_total_hs{"FMR"} = region_cons_CGs($methy_ref, 0, $#$methy_ref, "FMR");
+	
+	while($index <= $#$region_arr_ref){
+		
+		my ( $left_edge , $right_edge , $pattern ) 
+				= ( $$region_arr_ref[$index][0] , $$region_arr_ref[$index][1] , $$hs_pattern_ref[$index] );
+		
+		#merge two overlapping regions.
+		while( ($index+1 <= $#$region_arr_ref ) #and $right_edge > $$region_arr_ref[$index+1][0] 
+				and $$hs_pattern_ref[$index] eq $$hs_pattern_ref[$index+1] ){
+			my $gap = $$site_ref[ $$region_arr_ref[$index+1][0] ] - $$site_ref[ $right_edge ];
+			if( $gap >0 and $gap <= $gap_threshold ){
+				if( $$region_arr_ref[$index+1][0] - $right_edge <= 4 
+					or mean_pattern_judge( region_mean($right_edge,$$region_arr_ref[$index+1][0],$methy_ref,$site_ref) , $pattern , 0.1 ) ){
+					$right_edge = $$region_arr_ref[$index+1][1];
+				}
+				else{
+					last;
+				}
+			}
+			elsif( $gap <= 0 ){
+				$right_edge = $$region_arr_ref[$index+1][1];
+			}
+			else{
+				last;
+			}
+			$index ++;
+		}
+		
+		my ($length,$CG_sites,$mean,$var) = region_features( $left_edge, $right_edge , $site_ref, $methy_ref );
+		
+		print { ${$out_fh_hs_ref}{"UCSC"} } ucsc_bed_line( $chr,$$site_ref[$left_edge],$$site_ref[$right_edge],$pattern );
+		
+		#hyper_test
+=Hyper test .		
+		my ( $m , $t , $n , $r ) = ( $m_bg , $chr_methy_total_hs{$pattern} , $right_edge - $left_edge + 1 , region_cons_CGs($methy_ref, $left_edge , $right_edge , $pattern) );
+		
+		my $hyper_P = hyper_test( $m , $t , $n , $r );
+=cut
+		my $digital_features = join "\t",($length,$CG_sites,$mean,$var);
+		
+		print { ${$out_fh_hs_ref}{"$pattern"} } qq($chr\t$$site_ref[$left_edge]\t$$site_ref[$right_edge]\t$pattern\t$digital_features\n);
+		push @region,qq($chr\t$left_edge\t$right_edge\t$pattern\t$digital_features);
+		
+		$index ++;
+	}
+	
+	return \@region;
+}
+
+
+=DESCRIPTION hyper_test 			[ INDEPENDENT ]
+Goal: perform hypergeometric test 
+Usage: hyper_test ( bg_set,pattern_set,list,intersection )
+Return: P_value
+=cut
+sub hyper_test{			#( bg_set,pattern_set,list,intersection )
+	my ( $m , $t , $n , $r )=@_;
+	
+	unless( $m >= $n and $n >= $r and $m >= $t and $t >= $r and $r >= 0 ){	#all four num require 0.
+		print 'WARNING: Illegal input in sub program "hyper_test" \n';
+		return "1";
+	}
+	unless( $r >= 1 ){				# r = 0 ,return 1.
+		return "1";
+	}
+	
+	
+	my $var = 1;
+	my $P_value = 1;
+	
+	if( $n <= $m - $t ){
+		foreach my $i( 1 .. $n ){
+			$var *= ( $m - $t - $n + $i )/( $m - $n + $i );		# m >= n >= 0
+		}
+		$P_value -= $var;
+		
+		foreach my $x( 1 .. $r - 1 ){
+			$var *= ( $t - $x + 1 )*( $n - $x + 1 )/$x/( $m - $t - $n + $x );
+			$P_value -= $var;
+		}
+	}
+	
+	if($P_value < 0){
+		$P_value = 0;
+	}
+	return sprintf( "%0.8f" , $P_value );
+}
+
+=DESCRIPTION region_features
+Goal: calculate digital  features of a pattern reigon
+Usage: region_features( $left_edge, $right_edge , $site_ref, $methy_ref )
+Return: a list of digital features
+$length,$CG_sites,$mean,$var
+=cut
+sub region_features{
+	my ( $left_edge, $right_edge , $site_ref, $methy_ref ) = @_;
+	my ($start,$end) = ( $$site_ref[$left_edge] , $$site_ref[$right_edge] );
+	my ($length,$CG_sites,$mean,$var) = (0,0,0,0);
+	
+	my ($sum , $sum_sq , $num) = (0 , 0 , 0);
+	foreach my $i ($left_edge .. $right_edge){
+		$sum += $$methy_ref[$i];
+		$sum_sq += $$methy_ref[$i]**2;
+		
+		$num ++;
+	}
+	
+	($length,$CG_sites,$mean) = 
+		( $end - $start +1, $right_edge - $left_edge + 1 , $sum / $num);
+	if($num > 1){
+		$var = ($sum_sq/$num - ($sum/$num)**2) * ( $num/($num-1) );
+	}
+    else{
+		$var = 0;
+	}
+	$mean = sprintf( "%0.3f" , $mean );
+	$var  = sprintf( "%0.5f" , $var );
+	
+	return ($length,$CG_sites,$mean,$var);
+}
+
+=DESCRIPTION region_variance
+Goal: calculate the variance of a pattern reigon
+Usage: region_variance( $left_edge, $right_edge , $methy_ref )
+Return: a list of digital features
+$length,$CG_sites,$mean,$var
+=cut
+sub region_variance{
+	my ( $left_edge, $right_edge , $methy_ref ) = @_;
+	
+	my ( $mean , $var ) = ( 0 , 0 );
+	
+	my ( $sum , $sum_sq , $num ) = (0 , 0 , 0);
+	foreach my $i ($left_edge .. $right_edge){
+		$sum += $$methy_ref[$i];
+		$sum_sq += $$methy_ref[$i]**2;
+		
+		$num ++;
+	}
+	
+	if($num > 1){
+		$var = ($sum_sq/$num - ($sum/$num)**2) * ( $num/($num-1) );
+	}
+    else{
+		$var = 0;
+	}
+	
+	return $var;
+}
+
+=DESCRIPTION region_mean
+Goal: calculate the variance of a pattern reigon
+Usage: region_mean( $left_edge, $right_edge , $methy_ref )
+Return: a list of digital features
+$length,$CG_sites,$mean,$var
+=cut
+sub region_mean{
+	my ( $left_edge, $right_edge , $methy_ref , $site_ref ) = @_;
+	
+	my $mean = 0;
+	my $sum  = 0;
+	my $num  = 0;
+	
+	foreach my $i ($left_edge .. $right_edge){
+		$sum += $$methy_ref[$i];
+		$num ++;
+	}
+	
+	if($num >= 1){
+		$mean = $sum/$num ;
+	}
+    else{
+		#die "$left_edge\t$right_edge\t$$site_ref[$left_edge]\t$$site_ref[$right_edge]\nWARNING:The input array is null! (sub program region_mean)\n";
+		print "WARNING:The input array is null! (sub program region_mean)\n";
+		$mean = 0;
+	}
+	
+	return $mean;
+}
+
+
+=DESCRIPTION region_cons_CGs
+Goal: calculate digital  features of a pattern reigon
+Usage: region_info_CGs( $methy_ref, $start, $end, $pattern )
+Return: the number of CGs which are consistent with its pattern.
+=cut
+sub region_cons_CGs{
+	my ($methy_ref,$start,$end,$pattern) = @_;
+	
+	my $low = $pattern eq "UMR" ? 0
+			: $pattern eq "IMR" ? 0.4
+			: 					  0.8
+			;
+	my $high = $low + 0.2;
+	my $num  = 0;
+	
+	if($end >= $#$methy_ref){
+		$end = $#$methy_ref;
+	}
+	
+	foreach my $i($start..$end){
+		if($$methy_ref[$i] >= $low and $$methy_ref[$i] <= $high){
+			$num ++;
+		}
+	}
+	
+	return $num;
+}
+
+sub ucsc_bed_line{
+	my ($chr,$start,$end,$pattern) = @_;
+	
+	my $color = "";
+	if($pattern eq "FMR"){
+		$color = "58,181,74" ;
+	}
+	if($pattern eq "UMR"){
+		$color = "238,29,35";
+	}
+	if($pattern eq "IMR"){
+		$color = "255,255,106" ;
+	}
+	
+	my $ucsc_line = qq($chr\t$start\t$end\t$pattern\t0\t+\t$start\t$end\t$color\n);
+	return $ucsc_line;
+}
+
+sub print_helpfile{
+	print qq(
+pattern VERSION: $VERSION
+---------------------------------- H E L P ---------------------------------------
+"pattern" help you get methylation patterns from methylation level files(BS-Seq),
+"pattern" require ".wig" format or compressed wiggle format(".wig.gz").
+	(If not ".wig", you can use the tool "towig" at first)
+
+wig format must like this (chr1.wig):
+	track type=wiggle_0 name="Methylation Level" visibility=full color=20,150,20 altColor=150,20,20 windowingFunction=mean
+		variableStep chrom=chr1
+		3003660	1
+		3004613	0.87804
+		3004636	0.86956
+
+-------------------
+USAGE:	pattern [OPTION] [-i <folder>] [-o <folder>]
+-------------------
+ARGUMENTS:
+	--help,--man,-h
+				display the helpfile.
+ OPTION:
+	-hs_string
+				the threshold of hotspot for methylation, unmethylation, intermediate methylation. DEFAULT is 4,4,4
+ I/O:
+	-n,--name
+				(REQUIRED) Sample name. like H1, IMR90 and so on.
+	-i,--input
+				(REQUIRED) Input file, requires wiggle format(".wig", variableStep) or compressed wiggle format(".wig.gz").
+	-o,--outdir
+				(REQUIRED) Output directory.
+
+-------------------
+EXAMPLE:
+ BRIEF:
+	pattern -i H1_wig/H1_methy.wig -o H1_pattern/ -n H1
+	  get methylation patterns from "H1_wig/H1_methy.wig".
+ 
+ VERBOSE:
+	pattern -hs_string 6,4,4 -indir IMR90_wig/IMR90_methy.wig.gz -outdir IMR90_pattern/
+	  get methylation patterns from "IMR90_wig/IMR90_methy.wig.gz".The hotspot threshold for methylation is 6,the hotspot threshold for 
+	  unmethylation is 4,and the hotspot threshold for semi-methylation is 4.
+ OUTPUT:
+	the output will like this(H1_.bed):
+		Chr     Start   End     Pattern Length  CpG_sites       Mean    Var
+		chr1    564471  570301  UMR     5831    165     0.013   0.00070
+		chr1    714565  714763  UMR     199     7       0.046   0.00676
+		chr1    762113  762933  UMR     821     18      0.015   0.00199
+		chr1    840025  840293  UMR     269     5       0.000   0.00000
+-------------------------------------------------------------------------------
+);
+	die "\n";
+}
+
+sub outdir_control{		#( string folder )
+	my $outdir = $_[0];
+	
+	unless(-e $outdir){	
+		mkdir $outdir or die "Can't create $outdir!\nPlease check up this path.\n";
+	}
+}
+
+sub indir_control{		#( string folder )
+	my $indir = $_[0];
+	
+	unless(-e $indir and -d $indir){		
+		die "$indir open error!\nPlease check up this path.\n";
+	}
+}
+
+sub required_args{		#( @array )
+	my @arr = @_;
+	
+	foreach my $args(@arr){
+		unless($args){
+			print "Lack required arguments.\n";
+			print_helpfile();
+		}
+	}
+}
+
+sub welcome{
+	my $username = $ENV{'LOGNAME'};
+	my $pwd = $ENV{'PWD'};
+	my $tool_name = $0;
+
+	warn "-----------------------------------------------------------------------------------------\n";
+	warn "Hello! $username. Welcome to use $tool_name! (version: $VERSION)\n";
+	warn "Working directory: $pwd.\n";
+	warn "\n";
+}
+
+sub goodbye{
+	warn "\n";
+	warn "Thanks for your use. If you have any question or advice, feel free to contact us(wangxinyuhs\@126.com).\n";
+	warn "-----------------------------------------------------------------------------------------\n";
+}
+
+
+#get current time [hour:min:sec month,mday]
+sub call_time{
+	my $tab_nums = 0; #DEFAULT: has no tab 
+	$tab_nums = $_[0] if ($_[0]);
+
+	my ($sec, $min, $hour, $mday, $mon, $year, $wday, $yday, $isdst) = localtime;
+	my @months = qw(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec);
+	#my @weeks = qw(Sun Mon Tue Wed Thu Fri Sat);
+	#$year += 1900;
+	
+	return "[$hour:$min:$sec $months[$mon],$mday] ".("   " x $tab_nums);
+}
+
+sub print_test{
+	
+=TEST	Print hotspot
+
+	open TEST,">","$outdir/$chr.test";
+	print TEST qq(track itemRgb="On" name="WTI hotspot" description="hotspot regions" visibility=3\n);
+	foreach my $i(0..$#$hs_start_ref){
+		print TEST join "\t",($chr,$Site[$$hs_start_ref[$i]],$Site[$$hs_end_ref[$i]],$$hs_pattern_ref[$i]);
+		print TEST "\t0\t+\t$Site[$$hs_start_ref[$i]]\t$Site[$$hs_end_ref[$i]]\t";
+		if($$hs_pattern_ref[$i] eq "FMR"){
+			print TEST "58,181,74" ;
+			
+		}
+		if($$hs_pattern_ref[$i] eq "UMR"){
+			print TEST "238,29,35";
+		}
+		if($$hs_pattern_ref[$i] eq "IMR"){
+			print TEST "255,255,106" ;
+		}
+		print TEST "\n";
+	}
+=cut
+	my ($test_file,$hs_start_ref,$hs_end_ref,$hs_pattern_ref,$bound_arr_ref,$chr,$site_ref) = @_;
+	open TEST,">","$test_file" or die $test_file."\nPlease check up this path!\n";
+	print TEST qq(track itemRgb="On" name="WTI hotspot" description="hotspot regions" visibility=3\n);
+	foreach my $i(0..$#$hs_start_ref){
+		print TEST join "\t",($chr,$$site_ref[$$bound_arr_ref[$i][0]],$$site_ref[$$bound_arr_ref[$i][1]],$$hs_pattern_ref[$i]);
+		print TEST "\t0\t+\t$$site_ref[$$hs_start_ref[$i]]\t$$site_ref[$$hs_end_ref[$i]]\t";
+		if($$hs_pattern_ref[$i] eq "FMR"){
+			print TEST "58,181,74" ;
+			
+		}
+		if($$hs_pattern_ref[$i] eq "UMR"){
+			print TEST "238,29,35";
+		}
+		if($$hs_pattern_ref[$i] eq "IMR"){
+			print TEST "255,255,106" ;
+		}
+		print TEST "\n";
+	}
+	close TEST;
+}

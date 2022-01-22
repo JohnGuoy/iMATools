@@ -1,0 +1,655 @@
+#!/usr/bin/perl
+#--------------------------------------------------------------------------
+# This program is Copyright(C) 2015-20, Xinyu Wang (wangxinyuhs@126.com)
+#
+# This program is part of iBSTools.
+#
+# iBSTools is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# iBSTools is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with the program.  If not, see <http://www.gnu.org/licenses/>.
+#--------------------------------------------------------------------------
+
+=program flow -- modules
+	*  params control
+	1. split infile into wig file 
+	2. covert files in indir into wig file
+=cut
+
+use strict;
+use warnings;
+use Getopt::Long;
+
+our $VERSION = "1.3.0";
+
+# params control 
+my (
+	$help,
+	
+	$sample_name,		#sample name, like H1, imr90, HMec, Hcc1954 and so on
+	$infile,			#input file, dir or file
+	$outdir,			#output, only directory
+	
+	$head,				#the methy files head
+	
+	$m_u,				#column of methylated reads , unmethylated reads, like Bismark
+	$r_t,				#column of methylation ratio , total reads
+	$m_t,				#column of methylated reads , total reads
+	$ratio_col,				#column of methylation ratio (only methylation ratio)
+	
+	$merge, 			#merge positive and negative strand into postive strand
+	$genome_file,		#genome file
+);
+my $depth_th = 5;		#default is 5
+
+GetOptions(
+	'help|man|h' => \$help,
+	
+	'n|name=s'	   => \$sample_name,
+	'i|infile=s'   => \$infile,
+	'o|outdir=s'   => \$outdir,
+	
+	'depth=s'      => \$depth_th,
+	'head!'	       => \$head,
+	
+	'm_u|methy_unmethy=s'	=> \$m_u,
+	'm_t|methy_total=s' 	=> \$m_t,
+	'r_t|ratio_total=s' 	=> \$r_t,
+	'ratio=s'				=> \$ratio_col,
+	
+	'merge!'				=> \$merge,
+	'genome=s'				=> \$genome_file,
+);
+
+print_helpfile() if($help);
+required_args($sample_name, $infile, $outdir);
+indir_control($infile);
+outdir_control($outdir);
+
+welcome();
+
+# column control
+my ($m_col,$t_col,$u_col,$r_col) = (0,0,0,0);	#column attributes 
+if($m_t){
+	($m_col,$t_col) = split(",",$m_t);
+	($m_col,$t_col) = ($m_col-1,$t_col-1);
+}
+elsif($m_u){
+	($m_col,$u_col) = split(",",$m_u);
+	($m_col,$u_col) = ($m_col-1,$u_col-1);
+}
+elsif($r_t){
+	($r_col,$t_col) = split(",",$r_t);
+	($r_col,$t_col) = ($r_col-1,$t_col-1);
+}
+elsif($ratio_col){
+	$r_col = $r_col - 1;
+	$depth_th = 1;
+}
+else{
+	die "Require only one option in --methy_unmethy, --ratio_total, --methy_unmethy, --ratio.\nPlease read the help again!\n";
+}
+# end control #
+
+warn "SAMPLE_NAME:$sample_name\n";
+warn "INPUT:$infile\n";
+warn "OUTPUT:$outdir\n\n";
+
+warn call_time()."Check chromosome.\n";
+check_chr($infile);
+
+my $out_fh_hs_ref = out_settings( $outdir , $sample_name );
+warn call_time()."Convert into wiggle format.\n";
+my ($conf_CG_num, $total_info_CG, $methy_sum) = (0,0,0);
+my ($chr_col, $CG_col) = (0,1);
+#1. split infile into wig files
+
+if($merge){
+	required_args($genome_file);
+	
+	warn call_time()."Extract CpG sites from $genome_file.\n";
+	my $chr_CGs_ref = get_ref_CGs($genome_file); 	#chr => \(10469, 10471, 10484 ...)
+	warn call_time()."Merge postive and negative strand into one strand.\n";
+	my ($plus_CG_counts, $minus_CG_counts, $unmapped_CG_counts) = merge_towig($chr_CGs_ref, $infile, $out_fh_hs_ref, $depth_th);						#merge into one strand
+	my $total_counts = $plus_CG_counts + $minus_CG_counts + $unmapped_CG_counts;
+	
+	my $stat_line = sprintf "Merge completed. Total %d sites, %d(%.2f%%) on positive strand, %d(%.2f%%) on negative strand, %d(%.2f%%) unmapped.", 
+		$total_counts, $plus_CG_counts, ($plus_CG_counts/$total_counts)*100, $minus_CG_counts, ($minus_CG_counts/$total_counts)*100, $unmapped_CG_counts, ($unmapped_CG_counts/$total_counts)*100;
+	
+	warn call_time()."$stat_line\n";
+}
+else{  #not merge positive and negative strand (or only positive strand)
+	if(!-d $infile){				#input is a file(not a dir). then split by chromosome.
+		my $in_fh;
+		if( $infile =~ /gz$/ ){
+			open $in_fh,"zcat $infile |" or die $infile."$!\n";
+		}
+		else{
+			open $in_fh,"<",$infile  or die $infile."$!\n";
+		}
+		
+		<$in_fh> if($head);
+		my $chr = "start";
+		
+		while(my $line = <$in_fh>){
+			$line =~ s/[\r\n]$//g;
+			next if(!$line);
+			
+			my @arr = split(/\s+/,$line);
+			my ($curChr, $CpG, $ratio, $depth) = ($arr[$chr_col], $arr[$CG_col], 0, 0);
+
+			if($m_u){
+				$depth = $arr[$m_col] + $arr[$u_col];
+				$ratio = $arr[$m_col]/$depth if $depth > 0;
+			}
+			elsif($r_t){
+				$depth = $arr[$t_col];
+				$ratio = $arr[$r_col];
+			}
+			elsif($m_t){
+				$depth = $arr[$t_col];
+				$ratio = $arr[$m_col]/$depth if $depth > 0;
+			}
+			elsif($ratio_col){
+				$depth = 1;
+				$ratio = $arr[$r_col];
+			}
+			
+			if($curChr eq $chr){  	# current chromosome
+				$total_info_CG ++;
+				if($depth >= $depth_th){
+					printf { ${$out_fh_hs_ref}{"methy"} } "%s\t%.5f\n",$CpG,$ratio;
+					printf { ${$out_fh_hs_ref}{"depth"} } "%s\t%d\n",$CpG,$depth;
+					
+					$conf_CG_num ++;
+					$methy_sum += $ratio;
+				}
+			} 
+			elsif($chr eq "start"){
+				$chr = $curChr; 	#initiate: chr, description line, statistic number.
+				print { ${$out_fh_hs_ref}{"methy"} } "variableStep chrom=$curChr\n";
+				print { ${$out_fh_hs_ref}{"depth"} } "variableStep chrom=$curChr\n";
+				($conf_CG_num, $total_info_CG, $methy_sum) = (0,0,0);
+				
+				$total_info_CG ++;
+				if($depth >= $depth_th){
+					printf { ${$out_fh_hs_ref}{"methy"} } "%s\t%.5f\n",$CpG,$ratio;
+					printf { ${$out_fh_hs_ref}{"depth"} } "%s\t%d\n",$CpG,$depth;
+					
+					$conf_CG_num ++;
+					$methy_sum += $ratio;
+				}
+			}
+			else{ #curChr != chr  #the other chromosome, so print in another file.
+				warn call_time()."$chr is completed...\n";
+				if($total_info_CG >= 1 and $conf_CG_num >= 1){ #print statistic
+					printf { ${$out_fh_hs_ref}{"stat"} } "%s\t%d\t%.2f%%\t%.5f\n",$chr,$conf_CG_num,($conf_CG_num/$total_info_CG)*100,($methy_sum/$conf_CG_num) if($chr);
+				}
+				else{
+					print { ${$out_fh_hs_ref}{"stat"} } "$chr\t-\t-\t-\n";
+				}
+				
+				#initiate: chr, description line, statistic number.
+				$chr = $curChr;
+				print { ${$out_fh_hs_ref}{"methy"} } "variableStep chrom=$curChr\n";
+				print { ${$out_fh_hs_ref}{"depth"} } "variableStep chrom=$curChr\n";
+				($conf_CG_num, $total_info_CG, $methy_sum) = (0,0,0);
+				
+				$total_info_CG ++;
+				if($depth >= $depth_th){
+					printf { ${$out_fh_hs_ref}{"methy"} } "%s\t%.5f\n",$CpG,$ratio;
+					printf { ${$out_fh_hs_ref}{"depth"} } "%s\t%d\n",$CpG,$depth;
+					
+					$conf_CG_num ++;
+					$methy_sum += $ratio;
+				}
+			}
+		}
+		
+		warn call_time()."$chr is completed...\n";
+		if($total_info_CG >= 1 and $conf_CG_num >= 1){
+			printf { ${$out_fh_hs_ref}{"stat"} } "%s\t%d\t%.2f%%\t%.5f\n",$chr,$conf_CG_num,($conf_CG_num/$total_info_CG)*100,($methy_sum/$conf_CG_num) if($chr);
+		}
+		else{
+			print { ${$out_fh_hs_ref}{"stat"} } "$chr\t-\t-\t-\n";
+		}
+		close $in_fh;
+	}
+	#covert files in indir into wig files (this function has been hidden @v1.3.0)
+	else{							#input is a directory.
+		my @files = glob("$infile/*");
+		foreach my $file(@files){
+			my $in_fh;
+			if( $infile =~ /gz$/ ){
+				open $in_fh,"zcat $infile |" or die $infile."$!\n";
+			}
+			else{
+				open $in_fh,"<",$infile  or die $infile."$!\n";
+			}
+			<$in_fh> if($head);
+			
+			my $line = <$in_fh>;
+			my $chr = (split(/\s+/,$line))[0];
+			warn call_time()."$chr is running...\n";
+			
+			print { ${$out_fh_hs_ref}{"methy"} } "variableStep chrom=$chr\n";
+			print { ${$out_fh_hs_ref}{"depth"} } "variableStep chrom=$chr\n";
+			
+			($conf_CG_num,$total_info_CG,$methy_sum) = (0,0,0);
+			while($line){
+				$line =~ s/[\r\n]$//g;
+				next if(!$line);
+				$total_info_CG ++;
+				
+				my @arr = split(/\s+/,$line);
+				my ($curChr,$CpG,$ratio,$depth) = ($arr[$chr_col],$arr[$CG_col],0,0);
+
+				if($m_u){
+					$depth = $arr[$m_col] + $arr[$u_col];
+					$ratio = $arr[$m_col]/$depth;
+				}
+				elsif($r_t){
+					$depth = $arr[$t_col];
+					$ratio = $arr[$r_col];
+				}
+				elsif($m_t){
+					$depth = $arr[$t_col];
+					$ratio = $arr[$m_col]/$depth;
+				}
+				elsif($ratio){
+					$depth = 1;
+					$ratio = $arr[$r_col];
+				}
+				
+				if($depth >= $depth_th){
+					printf { ${$out_fh_hs_ref}{"methy"} } "%s\t%.5f\n",$CpG,$ratio;
+					printf { ${$out_fh_hs_ref}{"depth"} } "%s\t%d\n",$CpG,$depth;
+					$conf_CG_num ++;
+					$methy_sum += $ratio;
+				}
+				$line = <$in_fh>;
+			}
+			if($total_info_CG >= 1 and $conf_CG_num >= 1){
+				printf { ${$out_fh_hs_ref}{"stat"} } "%s\t%d\t%.2f%%\t%.5f\n",$chr,$conf_CG_num,($conf_CG_num/$total_info_CG)*100,($methy_sum/$conf_CG_num) if($chr);
+			}
+			else{
+				print { ${$out_fh_hs_ref}{"stat"} } "$chr\t-\t-\t-\n";
+			}
+			
+			close $in_fh;
+		}
+	}
+}
+warn call_time()."Completed!\n";
+goodbye();
+
+##################
+#  Sub Programs  #
+##################
+=DESCRIPTION out_settings  	[ INDEPENDENT ]
+	* Name: out_settings
+	* Function: set up file handle and header of output files.
+	* Params: $outdir, $file_name,
+	* Return: \%out_fh_hs.
+	* Independence: [ INDEPENDENT ]
+=cut
+sub out_settings{
+	my ( $outdir , $sample_name ) = @_;
+
+####create file handle and set up header
+	my $methy_wig_file = "$outdir/$sample_name"."_methy.wig";
+	open my $methy_fh,">","$methy_wig_file" or die $methy_wig_file."\nPlease check up this path!\n";
+	print $methy_fh qq(track type=wiggle_0 name="$sample_name methy" visibility=full color=20,150,20 altColor=150,20,20 windowingFunction=mean\n);
+
+	my $depth_wig_file = "$outdir/$sample_name"."_depth.wig";
+	open my $depth_fh,">","$depth_wig_file" or die $depth_wig_file."\nPlease check up this path!\n";
+	print $depth_fh qq(track type=wiggle_0 name="$sample_name depth" visibility=full color=20,150,20 altColor=150,20,20 windowingFunction=mean\n);
+	
+	my $stat_file = "$outdir/$sample_name"."_statistics.txt";
+	open my $stat_fh,">","$stat_file" or die $stat_file."\nPlease check up this path!\n";
+	print $stat_fh qq(Chr\tFilter_CpGs\tdepth>=$depth_th CpGs(%)\tAverage_methy\n);
+	
+####store file handles in hash	
+	my %out_fh_hs = (
+		'methy' => $methy_fh,
+		'depth' => $depth_fh,
+		'stat'  => $stat_fh
+		);
+
+	return \%out_fh_hs;
+}
+
+=DESCRIPTION get_ref_CGs  	[ INDEPENDENT ]
+	* Name: get_ref_CGs
+	* Function: get reference CpGs sites from reference genome.
+	* Params: $genome_file,
+	* Return: \%chr_hs. {chr1 => \(10469, 10471, 10484 ...)}
+	* Independence: [ INDEPENDENT ]
+=cut
+sub get_ref_CGs{
+	my ($genome_file) = @_;
+
+	my %chr_hs = (); #chr => "ATCGAAAD..."
+
+	my $chr = "";
+	open GENOME,"<",$genome_file or die "$!: $genome_file\n";
+	while(<GENOME>){
+		s/[\r\n]$//g;
+		if(/^>/){   #new chrom, chr1\s+***\n
+			s/>//g;
+			my @arr = split /\s+/;
+			$chr = $arr[0];
+			$chr_hs{$chr} = "";
+		}
+		else{
+			$chr_hs{$chr} .= uc $_;
+		}
+	}
+	close GENOME;
+
+	foreach my $chr(sort keys %chr_hs){
+		my $seq = $chr_hs{$chr};
+
+		my %CGs = ();
+		my $pos = index($seq,"CG") + 1;	#get first CG position
+		while($pos ne 0){	#get next CG position
+			$CGs{$pos} = 1;
+        	$pos = index($seq,"CG",$pos) + 1;
+		}
+
+		$chr_hs{$chr} = \%CGs;	#chr1 => \(10469, 10471, 10484 ...)
+	}
+
+	return \%chr_hs;
+}
+
+#merge two strand to wig.(eg. bismark cov)
+sub merge_towig{
+	my ($chr_CGs_ref, $infile, $out_fh_hs_ref, $depth_th) = @_;
+	
+	die "Error: $infile is a directory.\n" if(-d $infile);
+	
+	my $in_fh;
+	if( $infile =~ /gz$/ ){
+		open $in_fh,"zcat $infile |" or die $infile."$!\n";
+	}
+	else{
+		open $in_fh,"<",$infile  or die $infile."$!\n";
+	}
+	
+	my $unmap_file = "$outdir/unmapped_CG.txt";
+	open UNMAP, ">", "$unmap_file" or die $unmap_file."\nPlease check up this path!\n";
+	
+	<$in_fh> if($head);
+	my $chr = "start";
+	
+	my $unmapped_CG_counts = 0;   #unmapped CG counts
+	my $minus_CG_counts = 0;      #CG counts on minus strand
+	my $plus_CG_counts = 0;		  #CG counts on plus strand
+	
+	#methy and unmethy read counts
+	my %m_counts_hs = ();	#chr => \{cg => num}
+	my %u_counts_hs = ();	#chr => \{cg => num}
+	
+	while(my $line = <$in_fh>){
+		$line =~ s/[\r\n]$//g;
+		my @arr = split /\s+/, $line;
+		
+		my ($chr, $cg, $m_count, $u_count) = ($arr[$chr_col], $arr[$CG_col], 0, 0);
+		
+		if($m_u){
+			$m_count = $arr[$m_col];
+			$u_count = $arr[$u_col];
+		}
+		elsif($r_t){
+			$m_count = $arr[$r_col] * $arr[$t_col];
+			$u_count = $arr[$t_col] - $m_count;
+		}
+		elsif($m_t){
+			$m_count = $arr[$m_col];
+			$u_count = $arr[$t_col] - $m_count;
+		}
+		elsif($ratio_col){
+			$m_count = $arr[$r_col] * 10;
+			$u_count = 10 - $m_count;
+		}
+		
+		if(exists $$chr_CGs_ref{$chr}->{$cg}){   #in positive strand
+			$plus_CG_counts ++;
+			
+			$m_counts_hs{$chr}->{$cg} += $m_count;
+			$u_counts_hs{$chr}->{$cg} += $u_count;
+		}
+		elsif(exists $$chr_CGs_ref{$chr}->{$cg-1}){ #in negative strand
+			$minus_CG_counts ++;
+
+			$m_counts_hs{$chr}->{$cg-1} += $m_count;
+			$u_counts_hs{$chr}->{$cg-1} += $u_count;
+		}
+		else{ #not in CG position
+			$unmapped_CG_counts ++;
+			print UNMAP $line."\n";
+		}
+	}
+	close $in_fh;
+	close UNMAP;
+	
+	#print into wig file
+	foreach my $chr(sort keys %m_counts_hs){
+		print { ${$out_fh_hs_ref}{"methy"} } "variableStep chrom=$chr\n";
+		print { ${$out_fh_hs_ref}{"depth"} } "variableStep chrom=$chr\n";
+		
+		my ($conf_CG_num, $total_info_CG, $methy_sum) = (0, 0, 0);
+		foreach my $cg(sort {$a <=> $b} keys %{ $m_counts_hs{$chr} } ){
+			my $depth = $m_counts_hs{$chr}->{$cg} + $u_counts_hs{$chr}->{$cg};
+			$total_info_CG ++;
+
+			if($depth){ #this CG has infomation
+				if($depth >= $depth_th){  #depth filter
+					my $ratio = $m_counts_hs{$chr}->{$cg} / $depth;
+					
+					printf { ${$out_fh_hs_ref}{"methy"} }  "%s\t%.5f\n", $cg, $ratio;
+					printf { ${$out_fh_hs_ref}{"depth"} } "%s\t%d\n", $cg, $depth;
+					$conf_CG_num ++;
+					$methy_sum += $ratio;
+				}
+			}
+		}
+		if($total_info_CG >= 1 and $conf_CG_num >= 1){
+			printf { ${$out_fh_hs_ref}{"stat"} } "%s\t%d\t%.2f%%\t%.5f\n",$chr,$conf_CG_num,($conf_CG_num/$total_info_CG)*100,($methy_sum/$conf_CG_num) if($chr);
+		}
+		else{
+			print { ${$out_fh_hs_ref}{"stat"} } "$chr\t-\t-\t-\n";
+		}
+	}
+	
+	return (
+		$plus_CG_counts,
+	 	$minus_CG_counts,
+	 	$unmapped_CG_counts,
+	);
+}
+
+sub print_helpfile{
+	print qq(
+---------------------------------- H E L P ---------------------------------------
+"towig" help you convert methylation files into wiggle format which could be visualized on UCSC.
+	".wig" format is one of standard formats which iBSTools requires. 
+
+------------------
+USAGE:	towig [OPTION] {-m_u|-m_t|-r_t|--ratio <column>} [-i <file|folder>] [-o <folder>] [-n <sample name>]
+------------------
+ARGUMENTS:
+	-h,--help,--man
+				Display the helpfile.
+ OPTION:
+	--depth		
+				Depth threshold, "towig" will remove sites when its covered reads is less than the threshold. DEFAULT:5
+	--head		
+				The methy files has a header.
+	--merge
+				merge CpGs on two strands(postive,negative) into one strand. This require parameter "--genome".
+	--genome
+				When choose "--merge", specify the genome file(.fa).
+ 
+ Methylation & Depth column:
+ (REQUIRE) only one in these following four type:
+	-m_u,--methy_unmethy
+				The column of methylated counts and unmethylated counts. ".cov" files extracted from bismark like this.
+	-m_t,--methy_total
+				The column of methylated counts and total counts(covered reads).
+	-r_t,--ratio_total
+				The column of methylation ratio(decimal) and total counts(covered reads). Bsmap output need to choose this.
+	--ratio
+				The column of methylation ratio(decimal). (Only has methylation ratio, so "--depth" will not work.)
+				
+ I/O:
+	-n,--name
+				(REQUIRED) Sample name. like H1, IMR90 and so on. 
+	-i,--infile
+				(REQUIRED) Input methy file(text or compressed text ".gz").
+	-o,--outdir
+				(REQUIRED) Output FOLDER.
+
+------------------
+EXAMPLE:
+ BRIEF:
+	towig --methy_unmethy 5,6 -i H1_bismark.cov.gz -o H1_wig -n H1
+	  Convert "H1_bismark.cov" into wiggle format, methy counts is in col 5, unmethy counts is in col 6, outputs store in "H1_wig/". 
+	  (H1_bismark.cov comes from bismark.)
+  
+ COMPREHENSIVE:
+	towig --head --depth 8 --ratio_total 5,6 -i IMR90_bsmap.bed -o IMR90_wig -n IMR90
+	  Only restain the sites which depth is more than 8 and convert IMR90_bsmap.bed into ".wig" files.
+	  Methy level is in col 5, total counts is in col 6.
+	  (IMR90_bsmap.bed comes from BSMAP .)
+
+ OUTPUT:
+	Two wig files for each chromosome, methylation level and depth.
+	  Methylation file will like this (i.e. H1_methy.wig):
+		track type=wiggle_0 name="H1 methy" visibility=full color=20,150,20 altColor=150,20,20 windowingFunction=mean
+		variableStep chrom=chr1
+		3003660	1
+		3004613	0.87804
+		3004636	0.86956
+-------------------------------------------------------------------------------
+);
+	die "\n";
+}
+
+sub outdir_control{		#( string folder )
+	my $outdir = $_[0];
+	
+	unless(-e $outdir){	
+		mkdir $outdir or die "Can't create $outdir!\nPlease check up this path.\n";
+	}
+}
+
+sub indir_control{		#( string folder )
+	my $indir = $_[0];
+	
+	unless(-e $indir){		
+		die "$indir doesn't exist!\nPlease check up this path.\n";
+	}
+}
+
+sub required_args{		#( args1,args2,args3 ... )
+	my @arr = @_;
+	
+	foreach my $args(@arr){
+		unless($args){
+			print "Lack required arguments.\n";
+			print_helpfile();
+		}
+	}
+}
+
+sub check_chr{
+	my $is_ucsc_chr = 0;
+	if(!-d $infile){
+		my $in_fh;
+		if( $infile =~ /gz$/ ){
+			open $in_fh,"zcat $infile |" or die $infile."$!\n";
+		}
+		else{
+			open $in_fh,"<",$infile  or die $infile."$!\n";
+		}
+		
+		<$in_fh> if($head);
+		
+		my $check_row = 10000;
+		while(<$in_fh>){
+			s/[\r\n]$//g;
+			my @arr = split /\s+/;
+			if($arr[0] =~ /^chr/){ #chr1, chr2, ...
+				$is_ucsc_chr = 1;
+			}
+			$check_row --;
+			last if($check_row <= 0);
+		}
+	}
+	else{
+		my @files = glob("$infile/*");
+		foreach my $file(@files){
+			my $in_fh;
+			if( $infile =~ /gz$/ ){
+				open $in_fh,"zcat $infile |" or die $infile."$!\n";
+			}
+			else{
+				open $in_fh,"<",$infile  or die $infile."$!\n";
+			}
+			<$in_fh> if($head);
+			my $check_row = 10000;
+			while(<$in_fh>){
+				s/[\r\n]$//g;
+				my @arr = split /\s+/;
+				if($arr[0] =~ /^chr/){ #chr1, chr2, ...
+					$is_ucsc_chr = 1;
+				}
+				$check_row --;
+				last if($check_row <= 0);
+			}
+		}
+	}
+	if($is_ucsc_chr == 0){ #not ucsc chr
+		warn "WARNING: chr ID is not ucsc chromosome. This may cause some error when use UCSC Genome Browser to visualize.\n";
+	}
+}
+
+sub welcome{
+	my $username = $ENV{'LOGNAME'};
+	my $pwd = $ENV{'PWD'};
+	my $tool_name = $0;
+
+	warn "-----------------------------------------------------------------------------------------\n";
+	warn "Hello! $username. Welcome to use $tool_name! (version: $VERSION)\n";
+	warn "Working directory: $pwd.\n";
+	warn "\n";
+}
+
+sub goodbye{
+	warn "\n";
+	warn "Thanks for your use. If you have any question or advice, feel free to contact us(wangxinyuhs\@126.com).\n";
+	warn "-----------------------------------------------------------------------------------------\n";
+}
+
+#get current time [hour:min:sec month,mday]
+sub call_time{
+	my $tab_nums = 0; #DEFAULT: has no tab 
+	$tab_nums = $_[0] if ($_[0]);
+
+	my ($sec, $min, $hour, $mday, $mon, $year, $wday, $yday, $isdst) = localtime;
+	my @months = qw(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec);
+	#my @weeks = qw(Sun Mon Tue Wed Thu Fri Sat);
+	#$year += 1900;
+	
+	return "[$hour:$min:$sec $months[$mon],$mday] ".("   " x $tab_nums);
+}
