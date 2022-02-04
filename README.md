@@ -1,27 +1,26 @@
 
-## iBSTools
-&emsp;&emsp;iBStools(integrated Bisulfite Sequencing Tools) is an integrated tools for comprehensive analysis of bisulfite sequencing reads including whole genome bisulfite sequencing(WGBS) and reduced representation bisulfite sequencing (RRBS). 
->iBSTools is unpublished.
+## iMATools
+&emsp;&emsp;We developed an integrated DNA methylation pattern region identification and annotation platform iMATools (integrated Methylation Analysis Tools) based on long-read sequencing data, which is used for encoding processing, format conversion, methylation in ultra-large-scale long-read methylation information It aims to provide methylation researchers with professional methylation analysis and visualization tools for long-read sequencing, and accurately reveal DNA methylation patterns at the cellular and read levels.
 
-&emsp;&emsp;iBSTools has four modules:
+&emsp;&emsp;iMATools has four modules:
 * **towig** - methylation level file to Wiggle format
 * **pattern** - identification of methylation patterns  of genomic reigons
-* **refumr** - identification of reference methyalted regions among mutiple methylomes.
-* **dmr** - identification of differentially methylated regions among two groups
+* **mrv** - visualization of CpG sites in specific regions of the genome
 
-![workflow](https://github.com/methylation/iBSTools/blob/master/imgs/sketch_map.png "foo")
+--
+### Workflow
 
 --
 ### Install
-iBSTools can be used directly after decompressing. 
+You first need to install Ptyon v3.8+ and Perl v5.16+, then iMATools can be used directly after decompressing. 
 ```
-unzip iBSTools-master.zip
+unzip iMATools-master.zip
 ```
 
 --
 ### Manual
 
-* These are simple examples, more details please read the [iBSTools wiki](https://github.com/methylation/iBSTools/wiki)
+* These are simple examples.
 
 __Usage:__ Convert "H1_bismark.cov" into "wig" format. Methy counts is in col 5,unmethy counts is in col 6.
 ```shell
@@ -31,34 +30,24 @@ __Usage:__ Identify methylation patterns from "H1_wig/".
 ```shell
 pattern -i H1_wig/ -o H1_pattern/ -n H1
 ```
-__Usage:__ Identify reference methylation patterns regions from mutiple methylomes in "wig_list.txt".
+__Usage:__ Visualizing methylation of CpG sites in specific regions of Y chromosome third-generation sequencing data
 ```shell
-refumr -p UM -path ./software/iBSTools_v1.1.0/ -w wig_list.txt -o ref_UM
-```
-__Usage:__ Identify differentially methylated regions for a specific genomic regions between two groups of methylomes.
-```shell
-dmr -r ref_UM/ref_UM.bed -rh 1 -w1 file_list_1.txt  -w2 file_list_2.txt -o diff
+python mrv.py --data-file ./Y10895.txt --chromosome Y --cpg-range [10084283,10090100]
 ```
 
 --
 ### Using Tips
 
-1. If you use PBS(Portable Batch System) in your cluster server, **avoid to appoint relative path** for `-o,--outdir` and other parameters which need to assign path because workspace will be changed when pbs file is submitted. 
+1 If you use PBS(Portable Batch System) in your cluster server, **avoid to appoint relative path** for `-o,--outdir` and other parameters which need to assign path because workspace will be changed when pbs file is submitted. 
 
-2. wiggle format
+2 wiggle format
 More detail information in [UCSC Genome Browser: Wiggle Track Format (WIG)](http://genome.ucsc.edu/goldenPath/help/wiggle.html).
 
-3. construction information
-iBSTools is contructed in `R3.1.3` and `perl v5.16.3`. 
-and iBSTools is tested in R2.x and perl v5.10.x... 
-iBSTools just employs basic funtions in `R` and `perl`. So almost all of versions of R and perl is available.
+3 construction information
+iMATools is contructed in `Python v3.8` and `Perl v5.16.3`. 
+and iMATools is tested in Python v3.8 and Perl v5.16.3. 
 
-4. dependence relationship
+4 dependence relationship
 towig is independent. Input could come from `BSMAP`,`Bismark` or ENCODE, Roadmap, TCGA.
 pattern is independent. 
-refumr requires pattern. 
-
---
-#### Realease history
-More details please read the [Realease History](https://github.com/methylation/iBSTools/blob/master/REALEASE_HISTORY.md)
-
+mrv requires libraries of shutil, portion, matplotlib and tqdm. 
