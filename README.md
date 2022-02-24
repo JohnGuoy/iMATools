@@ -7,17 +7,14 @@
 * **pattern** - identification of methylation patterns  of genomic reigons
 * **mrv** - visualization of CpG sites in specific regions of the genome
 
---
 ### Workflow
 
---
 ### Install
 You first need to install Ptyon v3.8+ and Perl v5.16+, then iMATools can be used directly after decompressing. 
 ```
 unzip iMATools-master.zip
 ```
 
---
 ### Manual
 
 * These are simple examples.
@@ -35,7 +32,6 @@ __Usage:__ Visualizing methylation of CpG sites in specific regions of Y chromos
 python mrv.py --data-file ./Y10895.txt --chromosome Y --cpg-range [10084283,10090100]
 ```
 
---
 ### Using Tips
 
 1 If you use PBS(Portable Batch System) in your cluster server, **avoid to appoint relative path** for `-o,--outdir` and other parameters which need to assign path because workspace will be changed when pbs file is submitted. 
