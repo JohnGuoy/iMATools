@@ -2,7 +2,7 @@
 ## iMATools
 &emsp;&emsp;We developed an integrated DNA methylation pattern region identification and annotation platform iMATools (integrated Methylation Analysis Tools) based on long-read sequencing data, which is used for encoding processing, format conversion, methylation in ultra-large-scale long-read methylation information It aims to provide methylation researchers with professional methylation analysis and visualization tools for long-read sequencing, and accurately reveal DNA methylation patterns at the cellular and read levels.
 
-&emsp;&emsp;iMATools has three modules:
+&emsp;&emsp;There are 3 software tools in iMATools platform:
 * **towig** - methylation level file to Wiggle format
 * **pattern** - identification of methylation patterns  of genomic reigons
 * **mrv** - visualization of CpG sites in specific regions of the genome
@@ -24,7 +24,7 @@ pip install matplotlib
 
 ### Manual
 
-* These are simple examples.
+These are simple examples.
 
 __Usage:__ Convert "H1_bismark.cov" into "wig" format. Methy counts is in col 5,unmethy counts is in col 6.
 ```shell
