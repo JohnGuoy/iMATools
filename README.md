@@ -10,9 +10,16 @@
 ### Workflow
 
 ### Install
-You first need to install Ptyon v3.8+ and Perl v5.16+, then iMATools can be used directly after decompressing. 
+You first need to install Python v3.8+ and Perl v5.16+, then iMATools can be used directly after decompressing. 
 ```
-unzip iMATools-master.zip
+unzip iMATools-main.zip
+```
+
+For the mrv tool software, you need to install some dependency packages first:
+```
+pip install portion
+pip install tqdm
+pip install matplotlib
 ```
 
 ### Manual
@@ -31,6 +38,7 @@ __Usage:__ Visualizing methylation of CpG sites in specific regions of Y chromos
 ```shell
 python mrv.py --data-file ./Y10895.txt --chromosome Y --cpg-range [10084283,10090100]
 ```
+Output `Y_10084283_10087018_visualization.svg` file, you can open this file with Chrome browser, where black dots represent methylated CpG sites and white dots represent unmethylated CpG sites:
 
 ### Using Tips
 
